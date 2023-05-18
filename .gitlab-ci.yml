@@ -1,0 +1,145 @@
+stages:
+  - tests
+  - build
+  - staging
+  - review
+
+build:
+  image: $CONTAINER_REGISTRY/builder/gateway
+  stage: build
+  variables:
+    GATEWAY_SOURCE: $CI_PROJECT_DIR
+  services:
+    - docker:dind
+  script:
+    - packer init /etc/builder/gateway.pkr.hcl
+    - packer build /etc/builder/gateway.pkr.hcl
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      variables:
+        GATEWAY_VERSION: $CI_COMMIT_REF_SLUG
+    - if: $CI_MERGE_REQUEST_IID
+      changes:
+        - src/**/*
+        - config/**/*
+        - package.json
+        - package-lock.json
+        - tsconfig.build.json
+        - tsconfig.json
+        - .gitlab-ci.yml
+      variables:
+        GATEWAY_VERSION: $CI_COMMIT_REF_SLUG
+    - if: $CI_COMMIT_TAG
+      variables:
+        GATEWAY_VERSION: $CI_COMMIT_TAG
+
+.test:
+  image: node:16-alpine
+  stage: tests
+  before_script:
+    - npm install
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_MERGE_REQUEST_IID
+
+test:unit:
+  extends:
+    - .test
+  script:
+    - npm run test:unit -- --collectCoverage --coverageDirectory="./coverage/unit" --ci --reporters=default --reporters=jest-junit
+  artifacts:
+    when: always
+    reports:
+      junit:
+        - junit.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/functional/cobertura-coverage.xml
+
+test:functional:
+  extends:
+    - .test
+  services:
+    - name: mongo:4.4
+  variables:
+    APP_ENV: test
+    DATABASE_DSN: mongodb://mongo/mealbox
+  script:
+    - npm run test:functional -- --collectCoverage --coverageDirectory="./coverage/functional" --ci --reporters=default --reporters=jest-junit
+  artifacts:
+    when: always
+    reports:
+      junit:
+        - junit.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/functional/cobertura-coverage.xml
+
+deploy:
+  image: $CONTAINER_REGISTRY/deployer/gateway:mba-417
+  stage: staging
+  cache:
+    key: "${TF_ROOT}"
+    paths:
+      - ${TF_ROOT}/.terraform/
+  variables:
+    GIT_STRATEGY: none
+    TF_ROOT: /deployer
+    TF_STATE_NAME: $CI_COMMIT_REF_SLUG
+    TF_CACHE_KEY: $CI_COMMIT_REF_SLUG
+    TF_VAR_gateway_version: $CI_COMMIT_REF_SLUG
+    TF_VAR_gateway_environment: staging
+    TF_VAR_gateway_commit_id: $CI_COMMIT_SHA
+    TF_VAR_gateway_domain: mealbox.dev
+    TF_VAR_disk_statics_s3_endpoint: fra1.digitaloceanspaces.com
+    TF_VAR_disk_statics_s3_bucket: mealbox-statics-stating
+    TF_VAR_disk_statics_s3_region: fra1
+    TF_VAR_disk_statics_s3_public_url: https://statics.mealbox.dev
+  script:
+    - cd ${TF_ROOT}
+    - gitlab-terraform plan
+    - gitlab-terraform apply
+  resource_group: ${TF_STATE_NAME}
+  environment:
+    name: $CI_COMMIT_REF_SLUG
+    action: start
+    url: $ENVIRONMENT_URL
+    on_stop: validate
+  rules:
+    - if: $CI_MERGE_REQUEST_IID
+      variables:
+        ENVIRONMENT_URL: https://gateway-${CI_COMMIT_REF_SLUG}.mealbox.dev
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      variables:
+        ENVIRONMENT_URL: https://gateway.mealbox.dev
+
+validate:
+  image: $CONTAINER_REGISTRY/deployer/gateway
+  stage: review
+  when: manual
+  cache:
+    key: "${TF_ROOT}"
+    paths:
+      - ${TF_ROOT}/.terraform/
+  variables:
+    GIT_STRATEGY: none
+    TF_ROOT: /deployer
+    TF_STATE_NAME: $CI_COMMIT_REF_SLUG
+    TF_CACHE_KEY: $CI_COMMIT_REF_SLUG
+    TF_VAR_gateway_version: $CI_COMMIT_REF_SLUG
+    TF_VAR_gateway_environment: staging
+    TF_VAR_gateway_commit_id: $CI_COMMIT_SHA
+    TF_VAR_gateway_domain: mealbox.dev
+  script:
+    - cd ${TF_ROOT}
+    - gitlab-terraform plan
+    - gitlab-terraform destroy
+  resource_group: ${TF_STATE_NAME}
+  environment:
+    name: $CI_COMMIT_REF_SLUG
+    action: stop
+    url: $ENVIRONMENT_URL
+  rules:
+    - if: $CI_MERGE_REQUEST_IID
+      variables:
+        ENVIRONMENT_URL: https://gateway-${CI_COMMIT_REF_SLUG}.mealbox.dev

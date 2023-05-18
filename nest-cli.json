@@ -1,0 +1,15 @@
+{
+  "collection": "@nestjs/schematics",
+  "sourceRoot": "src",
+  "generateOptions": {
+    "spec": false
+  },
+  "compilerOptions": {
+    "assets": [
+      {
+        "include": "**/*.(jpeg|jpg|png)",
+        "outDir": "dist/src"
+      }
+    ]
+  }
+}
